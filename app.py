@@ -13,4 +13,4 @@ from flask import Flask, request, jsonify
     return jsonify({"text": text})
 
   if name == "main":
-    app.run(host="0.0.0.0", port=8000)
+    app.run(host="0.0.0.0", port=8765)
