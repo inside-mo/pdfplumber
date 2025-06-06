@@ -7,7 +7,7 @@ app = Flask(name)
 API_KEY = os.environ.get("API_KEY")
 PORT = int(os.environ.get("PORT", 8765))
 
-Health endpoint to verify the container is running
+# Health endpoint to verify the container is running
 @app.route("/health", methods=["GET"])
 def health():
 return jsonify({"status": "ok"})
