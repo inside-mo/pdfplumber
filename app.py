@@ -7,6 +7,11 @@ app = Flask(__name__)
 API_KEY = os.environ.get("API_KEY")
 PORT = int(os.environ.get("PORT", 9546))
 
+# Add a root endpoint that returns OK
+@app.route("/", methods=["GET"])
+def root():
+    return "OK", 200
+
 @app.route("/health", methods=["GET"])
 def health():
     return "OK", 200
@@ -15,11 +20,9 @@ def health():
 def extract_text():
     if request.headers.get("x-api-key") != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
-    
     pdf_file = request.files.get("file")
     if not pdf_file:
         return jsonify({"error": "No file provided"}), 400
-    
     try:
         with pdfplumber.open(pdf_file) as pdf:
             text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
