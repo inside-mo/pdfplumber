@@ -1,3 +1,4 @@
 pdfplumber
 flask
 gunicorn
+pandas
