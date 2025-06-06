@@ -5,6 +5,7 @@ import pdfplumber
 app = Flask(name)
 
 API_KEY = os.environ.get("API_KEY")
+PORT = int(os.environ.get("PORT", 8765))
 
 @app.route("/extract", methods=["POST"])
 def extract_text():
@@ -22,4 +23,4 @@ return jsonify({"text": text})
 except Exception as e:
 return jsonify({"error": str(e)}), 500
 if name == "main":
-app.run(host="0.0.0.0", port=8765)
+app.run(host="0.0.0.0", port=PORT)
