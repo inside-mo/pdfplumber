@@ -1,3 +1,36 @@
+import os
+from flask import Flask, request, jsonify
+import pdfplumber
+import pandas as pd
+
+# Create Flask app instance FIRST
+app = Flask(__name__)
+
+API_KEY = os.environ.get("API_KEY")
+PORT = int(os.environ.get("PORT", 9546))
+
+@app.route("/", methods=["GET"])
+def root():
+    return "OK", 200
+
+@app.route("/health", methods=["GET"])
+def health():
+    return "OK", 200
+
+@app.route("/extract", methods=["POST"])
+def extract_text():
+    if request.headers.get("x-api-key") != API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+    pdf_file = request.files.get("file")
+    if not pdf_file:
+        return jsonify({"error": "No file provided"}), 400
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+        return jsonify({"text": text})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/extract-all", methods=["POST"])
 def extract_all():
     """Extract both text and tables from a PDF in a single request"""
@@ -33,13 +66,13 @@ def extract_all():
                     if not table:
                         continue
                         
-                    # Convert to pandas DataFrame
-                    headers = table[0] if table else []
-                    data = table[1:] if len(table) > 1 else []
+                    # Convert to pandas DataFrame with explicit None handling
+                    safe_table = [[cell or "" for cell in row] for row in table]
+                    headers = safe_table[0] if safe_table else []
+                    data = safe_table[1:] if len(safe_table) > 1 else []
                     
                     # Create a clean dataframe
                     df = pd.DataFrame(data, columns=headers)
-                    df = df.fillna("")
                     
                     # Store table data
                     table_data = {
@@ -96,3 +129,6 @@ def extract_all():
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT)
