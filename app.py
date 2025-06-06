@@ -1,16 +1,25 @@
+import os
 from flask import Flask, request, jsonify
-  import pdfplumber
+import pdfplumber
 
-  app = Flask(name)
+app = Flask(name)
 
-  @app.route("/extract", methods=["POST"])
-  def extract_text():
-    pdf_file = request.files.get("file")
-    if not pdf_file:
-      return jsonify({"error": "No file provided"}), 400
-    with pdfplumber.open(pdf_file) as pdf:
-      text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
-    return jsonify({"text": text})
+API_KEY = os.environ.get("API_KEY")
 
-  if name == "main":
-    app.run(host="0.0.0.0", port=8765)
+@app.route("/extract", methods=["POST"])
+def extract_text():
+if request.headers.get("x-api-key") != API_KEY:
+return jsonify({"error": "Unauthorized"}), 401
+
+pdf_file = request.files.get("file")
+if not pdf_file:
+return jsonify({"error": "No file provided"}), 400
+
+try:
+with pdfplumber.open(pdf_file) as pdf:
+text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
+return jsonify({"text": text})
+except Exception as e:
+return jsonify({"error": str(e)}), 500
+if name == "main":
+app.run(host="0.0.0.0", port=8765)
