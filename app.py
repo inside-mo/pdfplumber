@@ -1,9 +1,10 @@
+
+from flask import Flask, request, jsonify, send_file
 import os
-from flask import Flask, request, jsonify
+import time
+import json
 import pdfplumber
 import pandas as pd
-
-# Create Flask app instance FIRST
 app = Flask(__name__)
 
 API_KEY = os.environ.get("API_KEY")
