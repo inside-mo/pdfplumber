@@ -17,6 +17,68 @@ def root():
 def health():
     return "OK", 200
 
+@app.route("/locate-field-text", methods=["POST"])
+def locate_field_text():
+    if request.headers.get("x-api-key") != API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    pdf_file = request.files.get("file")
+    field_name = request.form.get("fieldName", "Name:")
+    
+    if not pdf_file:
+        return jsonify({"error": "No file provided"}), 400
+    
+    try:
+        # Create a temporary file
+        temp_path = os.path.join('/tmp', f"pdfplumber_temp_{int(time.time())}.pdf")
+        pdf_file.save(temp_path)
+        
+        # Use pdfplumber to locate text
+        text_locations = []
+        
+        with pdfplumber.open(temp_path) as pdf:
+            for page_num, page in enumerate(pdf.pages):
+                # Get text and words with positions
+                text = page.extract_text() or ""
+                words = page.extract_words(keep_blank_chars=True)
+
+                # Look for the field name in text
+                lines = text.split('\n')
+                for line in lines:
+                    if field_name in line:
+                        # Get text after the field name
+                        parts = line.split(field_name, 1)
+                        if len(parts) > 1:
+                            value_to_redact = parts[1].strip()
+                            
+                            # Find this value in the words list to get coordinates
+                            for word in words:
+                                if value_to_redact in word['text']:
+                                    text_locations.append({
+                                        "page": page_num,  # 0-indexed page number
+                                        "text": word['text'],
+                                        "x0": float(word['x0']),
+                                        "y0": float(word['top']),
+                                        "x1": float(word['x1']),
+                                        "y1": float(word['bottom']),
+                                        "page_width": page.width,
+                                        "page_height": page.height
+                                    })
+        
+        # Clean up
+        os.remove(temp_path)
+        
+        # Return the locations
+        return jsonify({
+            "field_name": field_name,
+            "locations": text_locations
+        })
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/redact", methods=["POST"])
 def redact_text():
     if request.headers.get("x-api-key") != API_KEY:
