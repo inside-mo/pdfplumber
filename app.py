@@ -17,6 +17,46 @@ def root():
 def health():
     return "OK", 200
 
+@app.route("/redact", methods=["POST"])
+def redact_text():
+    if request.headers.get("x-api-key") != API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    pdf_file = request.files.get("file")
+    field_name = request.form.get("fieldName")
+    
+    if not pdf_file:
+        return jsonify({"error": "No file provided"}), 400
+    
+    if not field_name:
+        return jsonify({"error": "No field name provided"}), 400
+
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            # Create a results object to hold redaction data
+            results = []
+            
+            for page_num, page in enumerate(pdf.pages, 1):
+                text = page.extract_text() or ""
+                lines = text.split('\n')
+                
+                for line in lines:
+                    if field_name in line:
+                        # Get text after the field name
+                        parts = line.split(field_name, 1)
+                        if len(parts) > 1:
+                            value_to_redact = parts[1].strip()
+                            results.append({
+                                "page": page_num,
+                                "field": field_name,
+                                "value_detected": value_to_redact
+                            })
+            
+            return jsonify({"redaction_targets": results})
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/extract", methods=["POST"])
 def extract_text():
     if request.headers.get("x-api-key") != API_KEY:
