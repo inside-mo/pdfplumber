@@ -59,7 +59,7 @@ def locate_words(pdf_path, targets):
                             })
     return found
 
-def locate_words(pdf_path, targets):
+def locate-words(pdf_path, targets):
     # import string  # Uncomment if you want to strip punctuation
     found = []
     with pdfplumber.open(pdf_path) as pdf:
