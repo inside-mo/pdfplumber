@@ -17,60 +17,17 @@ def health():
     return "OK", 200
 
 def locate_words(pdf_path, targets):
+    # import string  # Uncomment to strip punctuation
     found = []
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages):
             words = page.extract_words(keep_blank_chars=True)
             word_texts = [w['text'].strip() for w in words]
             word_texts_lower = [w.lower() for w in word_texts]
-            for target in targets:
-                target_words = [tw.strip() for tw in target.split()]
-                target_words_lower = [tw.lower() for tw in target_words]
-                if len(target_words) == 1:
-                    # Single word match
-                    for i, w in enumerate(word_texts_lower):
-                        if w == target_words_lower[0]:
-                            word = words[i]
-                            found.append({
-                                "page": page_num,
-                                "text": word['text'],
-                                "x0": float(word['x0']),
-                                "y0": float(word['top']),
-                                "x1": float(word['x1']),
-                                "y1": float(word['bottom']),
-                                "page_width": page.width,
-                                "page_height": page.height
-                            })
-                else:
-                    # Multi-word sequence match
-                    for i in range(len(word_texts_lower) - len(target_words_lower) + 1):
-                        if word_texts_lower[i:i+len(target_words_lower)] == target_words_lower:
-                            first = words[i]
-                            last = words[i+len(target_words_lower)-1]
-                            found.append({
-                                "page": page_num,
-                                "text": " ".join(word_texts[i:i+len(target_words_lower)]),
-                                "x0": float(first['x0']),
-                                "y0": float(first['top']),
-                                "x1": float(last['x1']),
-                                "y1": float(last['bottom']),
-                                "page_width": page.width,
-                                "page_height": page.height
-                            })
-    return found
-
-def locate-words(pdf_path, targets):
-    # import string  # Uncomment if you want to strip punctuation
-    found = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages):
-            words = page.extract_words(keep_blank_chars=True)
-            word_texts = [w['text'].strip() for w in words]
-            word_texts_lower = [w.lower() for w in word_texts]
-            # word_texts_lower = [w.translate(str.maketrans('', '', string.punctuation)).lower() for w in word_texts]  # Strip punctuation if needed
+            # word_texts_lower = [w.translate(str.maketrans('', '', string.punctuation)).lower() for w in word_texts]
             for target in targets:
                 target_clean = target.strip().lower()
-                # target_clean = target_clean.translate(str.maketrans('', '', string.punctuation))  # Strip punctuation if needed
+                # target_clean = target_clean.translate(str.maketrans('', '', string.punctuation))  # Uncomment to strip punctuation
                 target_words = [tw.strip() for tw in target_clean.split()]
                 if len(target_words) == 1:
                     # Single word match
@@ -104,6 +61,29 @@ def locate-words(pdf_path, targets):
                                 "page_height": page.height
                             })
     return found
+
+@app.route("/locate-words", methods=["POST"])
+def locate_words_endpoint():
+    if request.headers.get("x-api-key") != API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    pdf_file = request.files.get("file")
+    words_to_redact = request.form.getlist("words")
+
+    if not pdf_file:
+        return jsonify({"error": "No file provided"}), 400
+    if not words_to_redact:
+        return jsonify({"error": "No words provided"}), 400
+
+    temp_path = os.path.join('/tmp', f"pdfplumber_temp_{int(time.time())}.pdf")
+    pdf_file.save(temp_path)
+    try:
+        results = locate_words(temp_path, words_to_redact)
+        os.remove(temp_path)
+        return jsonify({"matches": results})
+    except Exception as e:
+        os.remove(temp_path)
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/debug-words", methods=["POST"])
 def debug_words():
