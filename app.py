@@ -1,10 +1,8 @@
-
 from flask import Flask, request, jsonify, send_file
 import os
 import time
-import json
 import pdfplumber
-import pandas as pd
+
 app = Flask(__name__)
 
 API_KEY = os.environ.get("API_KEY")
@@ -18,6 +16,85 @@ def root():
 def health():
     return "OK", 200
 
+def locate_words(pdf_path, targets):
+    found = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_num, page in enumerate(pdf.pages):
+            words = page.extract_words(keep_blank_chars=True)
+            for target in targets:
+                # For single-word targets, match individual words (case-insensitive)
+                if len(target.split()) == 1:
+                    for word in words:
+                        if word['text'].strip().lower() == target.strip().lower():
+                            found.append({
+                                "page": page_num,
+                                "text": word['text'],
+                                "x0": float(word['x0']),
+                                "y0": float(word['top']),
+                                "x1": float(word['x1']),
+                                "y1": float(word['bottom']),
+                                "page_width": page.width,
+                                "page_height": page.height
+                            })
+                else:
+                    # For multi-word targets, try to match phrases on the same line
+                    text_lines = (page.extract_text() or "").split('\n')
+                    for line in text_lines:
+                        if target.lower() in line.lower():
+                            # Try to find first and last words of the phrase
+                            phrase_words = target.strip().split()
+                            i = 0
+                            found_words = []
+                            for w in words:
+                                # Check if word matches next phrase word (case-insensitive)
+                                if w['text'].strip().lower() == phrase_words[i].lower():
+                                    found_words.append(w)
+                                    i += 1
+                                    if i == len(phrase_words):
+                                        break
+                                else:
+                                    # Reset if the sequence breaks
+                                    if found_words:
+                                        found_words = []
+                                        i = 0
+                            if len(found_words) == len(phrase_words):
+                                first = found_words[0]
+                                last = found_words[-1]
+                                found.append({
+                                    "page": page_num,
+                                    "text": target,
+                                    "x0": float(first['x0']),
+                                    "y0": float(first['top']),
+                                    "x1": float(last['x1']),
+                                    "y1": float(last['bottom']),
+                                    "page_width": page.width,
+                                    "page_height": page.height
+                                })
+    return found
+
+@app.route("/locate-words", methods=["POST"])
+def locate_words_endpoint():
+    if request.headers.get("x-api-key") != API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    pdf_file = request.files.get("file")
+    words_to_redact = request.form.getlist("words")
+
+    if not pdf_file:
+        return jsonify({"error": "No file provided"}), 400
+    if not words_to_redact:
+        return jsonify({"error": "No words provided"}), 400
+
+    temp_path = os.path.join('/tmp', f"pdfplumber_temp_{int(time.time())}.pdf")
+    pdf_file.save(temp_path)
+    try:
+        results = locate_words(temp_path, words_to_redact)
+        os.remove(temp_path)
+        return jsonify({"matches": results})
+    except Exception as e:
+        os.remove(temp_path)
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/locate-field-text", methods=["POST"])
 def locate_field_text():
     if request.headers.get("x-api-key") != API_KEY:
@@ -25,38 +102,29 @@ def locate_field_text():
 
     pdf_file = request.files.get("file")
     field_name = request.form.get("fieldName", "Name:")
-    
+
     if not pdf_file:
         return jsonify({"error": "No file provided"}), 400
-    
+
     try:
-        # Create a temporary file
         temp_path = os.path.join('/tmp', f"pdfplumber_temp_{int(time.time())}.pdf")
         pdf_file.save(temp_path)
-        
-        # Use pdfplumber to locate text
         text_locations = []
-        
+
         with pdfplumber.open(temp_path) as pdf:
             for page_num, page in enumerate(pdf.pages):
-                # Get text and words with positions
                 text = page.extract_text() or ""
                 words = page.extract_words(keep_blank_chars=True)
-
-                # Look for the field name in text
                 lines = text.split('\n')
                 for line in lines:
                     if field_name in line:
-                        # Get text after the field name
                         parts = line.split(field_name, 1)
                         if len(parts) > 1:
                             value_to_redact = parts[1].strip()
-                            
-                            # Find this value in the words list to get coordinates
                             for word in words:
                                 if value_to_redact in word['text']:
                                     text_locations.append({
-                                        "page": page_num,  # 0-indexed page number
+                                        "page": page_num,
                                         "text": word['text'],
                                         "x0": float(word['x0']),
                                         "y0": float(word['top']),
@@ -65,16 +133,13 @@ def locate_field_text():
                                         "page_width": page.width,
                                         "page_height": page.height
                                     })
-        
-        # Clean up
+
         os.remove(temp_path)
-        
-        # Return the locations
         return jsonify({
             "field_name": field_name,
             "locations": text_locations
         })
-            
+
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -87,25 +152,21 @@ def redact_text():
 
     pdf_file = request.files.get("file")
     field_name = request.form.get("fieldName")
-    
+
     if not pdf_file:
         return jsonify({"error": "No file provided"}), 400
-    
+
     if not field_name:
         return jsonify({"error": "No field name provided"}), 400
 
     try:
         with pdfplumber.open(pdf_file) as pdf:
-            # Create a results object to hold redaction data
             results = []
-            
             for page_num, page in enumerate(pdf.pages, 1):
                 text = page.extract_text() or ""
                 lines = text.split('\n')
-                
                 for line in lines:
                     if field_name in line:
-                        # Get text after the field name
                         parts = line.split(field_name, 1)
                         if len(parts) > 1:
                             value_to_redact = parts[1].strip()
@@ -114,9 +175,7 @@ def redact_text():
                                 "field": field_name,
                                 "value_detected": value_to_redact
                             })
-            
             return jsonify({"redaction_targets": results})
-            
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -136,82 +195,60 @@ def extract_text():
 
 @app.route("/extract-all", methods=["POST"])
 def extract_all():
-    """Extract both text and tables from a PDF in a single request"""
     if request.headers.get("x-api-key") != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
-    
+
     pdf_file = request.files.get("file")
     if not pdf_file:
         return jsonify({"error": "No file provided"}), 400
-    
+
     try:
+        import pandas as pd
         result = {
             "text": [],
             "tables": [],
             "combined": []
         }
-        
+
         with pdfplumber.open(pdf_file) as pdf:
             for page_num, page in enumerate(pdf.pages, 1):
-                # Safely extract text, replacing None with empty string
                 text = page.extract_text() or ""
                 result["text"].append({
                     "page": page_num,
                     "content": text
                 })
-                
-                # Safely extract tables, replacing None with empty list
                 tables = page.extract_tables() or []
                 page_tables = []
-                
-                # Process each table
                 for i, table in enumerate(tables, 1):
                     if not table:
                         continue
-                        
-                    # Convert to pandas DataFrame with explicit None handling
                     safe_table = [[cell or "" for cell in row] for row in table]
                     headers = safe_table[0] if safe_table else []
                     data = safe_table[1:] if len(safe_table) > 1 else []
-                    
-                    # Create a clean dataframe
                     df = pd.DataFrame(data, columns=headers)
-                    
-                    # Store table data
                     table_data = {
                         "table_number": i,
                         "headers": headers,
                         "data": df.to_dict(orient="records")
                     }
                     page_tables.append(table_data)
-                
-                # Add tables for this page
                 if page_tables:
                     result["tables"].append({
                         "page": page_num,
                         "tables": page_tables
                     })
-                
-                # Create combined chronological elements
                 elements = []
-                
-                # Add text as one element
                 if text:
                     elements.append({
                         "type": "text",
                         "content": text
                     })
-                
-                # Add each table
                 for i, table in enumerate(tables, 1):
                     if not table:
                         continue
-                    
-                    # Safe conversion to DataFrame with explicit None handling
                     safe_table = [[cell or "" for cell in row] for row in table]
                     headers = safe_table[0] if safe_table else []
                     data = safe_table[1:] if len(safe_table) > 1 else []
-                    
                     df = pd.DataFrame(data, columns=headers)
                     elements.append({
                         "type": "table",
@@ -219,15 +256,12 @@ def extract_all():
                         "headers": headers,
                         "data": df.to_dict(orient="records")
                     })
-                
-                # Add the combined elements for this page
                 result["combined"].append({
                     "page": page_num,
                     "elements": elements
                 })
-        
         return jsonify(result)
-    
+
     except Exception as e:
         import traceback
         traceback.print_exc()
