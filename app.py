@@ -27,9 +27,9 @@ def locate_words(pdf_path, targets):
                 target_clean = target.strip().lower()
                 target_words = [tw.strip() for tw in target_clean.split()]
                 if len(target_words) == 1:
+                    # Single word match: substring (handles phrases as a single extracted word)
                     for i, w in enumerate(word_texts_lower):
-                        print(f"Trying single-word match: '{w}' vs '{target_words[0]}'")
-                        if w == target_words[0]:
+                        if target_words[0] in w:
                             word = words[i]
                             found.append({
                                 "page": page_num,
@@ -42,8 +42,23 @@ def locate_words(pdf_path, targets):
                                 "page_height": page.height
                             })
                 else:
+                    # Multi-word: match if phrase appears as a single extracted word
+                    joined_target = " ".join(target_words)
+                    for i, w in enumerate(word_texts_lower):
+                        if w == joined_target:
+                            word = words[i]
+                            found.append({
+                                "page": page_num,
+                                "text": word['text'],
+                                "x0": float(word['x0']),
+                                "y0": float(word['top']),
+                                "x1": float(word['x1']),
+                                "y1": float(word['bottom']),
+                                "page_width": page.width,
+                                "page_height": page.height
+                            })
+                    # Also, try to match as a sequence of separate words
                     for i in range(len(word_texts_lower) - len(target_words) + 1):
-                        print(f"Trying sequence match: '{word_texts_lower[i:i+len(target_words)]}' vs '{target_words}'")
                         if word_texts_lower[i:i+len(target_words)] == target_words:
                             first = words[i]
                             last = words[i+len(target_words)-1]
@@ -57,9 +72,8 @@ def locate_words(pdf_path, targets):
                                 "page_width": page.width,
                                 "page_height": page.height
                             })
-    print("Found matches:", found)
     return found
-    
+
 @app.route("/locate-words", methods=["POST"])
 def locate_words_endpoint():
     if request.headers.get("x-api-key") != API_KEY:
@@ -67,7 +81,7 @@ def locate_words_endpoint():
 
     pdf_file = request.files.get("file")
     words_to_redact = request.form.getlist("words")
-    print("Received words to redact:", words_to_redact)  # <--- print what you received
+    print("Received words to redact:", words_to_redact)  # For debugging
 
     if not pdf_file:
         return jsonify({"error": "No file provided"}), 400
@@ -77,18 +91,8 @@ def locate_words_endpoint():
     temp_path = os.path.join('/tmp', f"pdfplumber_temp_{int(time.time())}.pdf")
     pdf_file.save(temp_path)
     try:
-        # Print extracted words for the first page as a sample
-        with pdfplumber.open(temp_path) as pdf:
-            for page_num, page in enumerate(pdf.pages):
-                words = page.extract_words(keep_blank_chars=True)
-                word_texts = [w['text'].strip() for w in words]
-                print(f"Page {page_num} extracted words: {word_texts}")
-                # Just print for the first page for now
-                break
-
         results = locate_words(temp_path, words_to_redact)
-        print("Locate words results:", results)  # <--- print what was found
-
+        print("Locate words results:", results)  # For debugging
         os.remove(temp_path)
         return jsonify({"matches": results})
     except Exception as e:
