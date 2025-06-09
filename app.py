@@ -95,55 +95,48 @@ def locate_words_endpoint():
         os.remove(temp_path)
         return jsonify({"error": str(e)}), 500
 
-@app.route("/locate-field-text", methods=["POST"])
-def locate_field_text():
-    if request.headers.get("x-api-key") != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    pdf_file = request.files.get("file")
-    field_name = request.form.get("fieldName", "Name:")
-
-    if not pdf_file:
-        return jsonify({"error": "No file provided"}), 400
-
-    try:
-        temp_path = os.path.join('/tmp', f"pdfplumber_temp_{int(time.time())}.pdf")
-        pdf_file.save(temp_path)
-        text_locations = []
-
-        with pdfplumber.open(temp_path) as pdf:
-            for page_num, page in enumerate(pdf.pages):
-                text = page.extract_text() or ""
-                words = page.extract_words(keep_blank_chars=True)
-                lines = text.split('\n')
-                for line in lines:
-                    if field_name in line:
-                        parts = line.split(field_name, 1)
-                        if len(parts) > 1:
-                            value_to_redact = parts[1].strip()
-                            for word in words:
-                                if value_to_redact in word['text']:
-                                    text_locations.append({
-                                        "page": page_num,
-                                        "text": word['text'],
-                                        "x0": float(word['x0']),
-                                        "y0": float(word['top']),
-                                        "x1": float(word['x1']),
-                                        "y1": float(word['bottom']),
-                                        "page_width": page.width,
-                                        "page_height": page.height
-                                    })
-
-        os.remove(temp_path)
-        return jsonify({
-            "field_name": field_name,
-            "locations": text_locations
-        })
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+def locate_words(pdf_path, targets):
+    found = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_num, page in enumerate(pdf.pages):
+            words = page.extract_words(keep_blank_chars=True)
+            word_texts = [w['text'].strip() for w in words]
+            word_texts_lower = [w.lower() for w in word_texts]
+            for target in targets:
+                target_words = [tw.strip() for tw in target.split()]
+                target_words_lower = [tw.lower() for tw in target_words]
+                if len(target_words) == 1:
+                    # Single word match
+                    for i, w in enumerate(word_texts_lower):
+                        if w == target_words_lower[0]:
+                            word = words[i]
+                            found.append({
+                                "page": page_num,
+                                "text": word['text'],
+                                "x0": float(word['x0']),
+                                "y0": float(word['top']),
+                                "x1": float(word['x1']),
+                                "y1": float(word['bottom']),
+                                "page_width": page.width,
+                                "page_height": page.height
+                            })
+                else:
+                    # Multi-word sequence match
+                    for i in range(len(word_texts_lower) - len(target_words_lower) + 1):
+                        if word_texts_lower[i:i+len(target_words_lower)] == target_words_lower:
+                            first = words[i]
+                            last = words[i+len(target_words_lower)-1]
+                            found.append({
+                                "page": page_num,
+                                "text": " ".join(word_texts[i:i+len(target_words_lower)]),
+                                "x0": float(first['x0']),
+                                "y0": float(first['top']),
+                                "x1": float(last['x1']),
+                                "y1": float(last['bottom']),
+                                "page_width": page.width,
+                                "page_height": page.height
+                            })
+    return found
 
 @app.route("/redact", methods=["POST"])
 def redact_text():
