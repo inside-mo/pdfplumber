@@ -66,6 +66,7 @@ def locate_words_endpoint():
 
     pdf_file = request.files.get("file")
     words_to_redact = request.form.getlist("words")
+    print("Received words to redact:", words_to_redact)  # <--- print what you received
 
     if not pdf_file:
         return jsonify({"error": "No file provided"}), 400
@@ -75,7 +76,18 @@ def locate_words_endpoint():
     temp_path = os.path.join('/tmp', f"pdfplumber_temp_{int(time.time())}.pdf")
     pdf_file.save(temp_path)
     try:
+        # Print extracted words for the first page as a sample
+        with pdfplumber.open(temp_path) as pdf:
+            for page_num, page in enumerate(pdf.pages):
+                words = page.extract_words(keep_blank_chars=True)
+                word_texts = [w['text'].strip() for w in words]
+                print(f"Page {page_num} extracted words: {word_texts}")
+                # Just print for the first page for now
+                break
+
         results = locate_words(temp_path, words_to_redact)
+        print("Locate words results:", results)  # <--- print what was found
+
         os.remove(temp_path)
         return jsonify({"matches": results})
     except Exception as e:
