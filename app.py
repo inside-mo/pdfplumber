@@ -27,8 +27,8 @@ def locate_words(pdf_path, targets):
                 target_clean = target.strip().lower()
                 target_words = [tw.strip() for tw in target_clean.split()]
                 if len(target_words) == 1:
-                    # Single word match
                     for i, w in enumerate(word_texts_lower):
+                        print(f"Trying single-word match: '{w}' vs '{target_words[0]}'")
                         if w == target_words[0]:
                             word = words[i]
                             found.append({
@@ -42,8 +42,8 @@ def locate_words(pdf_path, targets):
                                 "page_height": page.height
                             })
                 else:
-                    # Multi-word sequence match
                     for i in range(len(word_texts_lower) - len(target_words) + 1):
+                        print(f"Trying sequence match: '{word_texts_lower[i:i+len(target_words)]}' vs '{target_words}'")
                         if word_texts_lower[i:i+len(target_words)] == target_words:
                             first = words[i]
                             last = words[i+len(target_words)-1]
@@ -57,8 +57,9 @@ def locate_words(pdf_path, targets):
                                 "page_width": page.width,
                                 "page_height": page.height
                             })
+    print("Found matches:", found)
     return found
-
+    
 @app.route("/locate-words", methods=["POST"])
 def locate_words_endpoint():
     if request.headers.get("x-api-key") != API_KEY:
