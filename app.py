@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify
 import os
 import time
 import pdfplumber
@@ -15,85 +15,6 @@ def root():
 @app.route("/health", methods=["GET"])
 def health():
     return "OK", 200
-
-def locate_words(pdf_path, targets):
-    found = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages):
-            words = page.extract_words(keep_blank_chars=True)
-            for target in targets:
-                # For single-word targets, match individual words (case-insensitive)
-                if len(target.split()) == 1:
-                    for word in words:
-                        if word['text'].strip().lower() == target.strip().lower():
-                            found.append({
-                                "page": page_num,
-                                "text": word['text'],
-                                "x0": float(word['x0']),
-                                "y0": float(word['top']),
-                                "x1": float(word['x1']),
-                                "y1": float(word['bottom']),
-                                "page_width": page.width,
-                                "page_height": page.height
-                            })
-                else:
-                    # For multi-word targets, try to match phrases on the same line
-                    text_lines = (page.extract_text() or "").split('\n')
-                    for line in text_lines:
-                        if target.lower() in line.lower():
-                            # Try to find first and last words of the phrase
-                            phrase_words = target.strip().split()
-                            i = 0
-                            found_words = []
-                            for w in words:
-                                # Check if word matches next phrase word (case-insensitive)
-                                if w['text'].strip().lower() == phrase_words[i].lower():
-                                    found_words.append(w)
-                                    i += 1
-                                    if i == len(phrase_words):
-                                        break
-                                else:
-                                    # Reset if the sequence breaks
-                                    if found_words:
-                                        found_words = []
-                                        i = 0
-                            if len(found_words) == len(phrase_words):
-                                first = found_words[0]
-                                last = found_words[-1]
-                                found.append({
-                                    "page": page_num,
-                                    "text": target,
-                                    "x0": float(first['x0']),
-                                    "y0": float(first['top']),
-                                    "x1": float(last['x1']),
-                                    "y1": float(last['bottom']),
-                                    "page_width": page.width,
-                                    "page_height": page.height
-                                })
-    return found
-
-@app.route("/locate-words", methods=["POST"])
-def locate_words_endpoint():
-    if request.headers.get("x-api-key") != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    pdf_file = request.files.get("file")
-    words_to_redact = request.form.getlist("words")
-
-    if not pdf_file:
-        return jsonify({"error": "No file provided"}), 400
-    if not words_to_redact:
-        return jsonify({"error": "No words provided"}), 400
-
-    temp_path = os.path.join('/tmp', f"pdfplumber_temp_{int(time.time())}.pdf")
-    pdf_file.save(temp_path)
-    try:
-        results = locate_words(temp_path, words_to_redact)
-        os.remove(temp_path)
-        return jsonify({"matches": results})
-    except Exception as e:
-        os.remove(temp_path)
-        return jsonify({"error": str(e)}), 500
 
 def locate_words(pdf_path, targets):
     found = []
@@ -137,6 +58,48 @@ def locate_words(pdf_path, targets):
                                 "page_height": page.height
                             })
     return found
+
+@app.route("/locate-words", methods=["POST"])
+def locate_words_endpoint():
+    if request.headers.get("x-api-key") != API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    pdf_file = request.files.get("file")
+    words_to_redact = request.form.getlist("words")
+
+    if not pdf_file:
+        return jsonify({"error": "No file provided"}), 400
+    if not words_to_redact:
+        return jsonify({"error": "No words provided"}), 400
+
+    temp_path = os.path.join('/tmp', f"pdfplumber_temp_{int(time.time())}.pdf")
+    pdf_file.save(temp_path)
+    try:
+        results = locate_words(temp_path, words_to_redact)
+        os.remove(temp_path)
+        return jsonify({"matches": results})
+    except Exception as e:
+        os.remove(temp_path)
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/debug-words", methods=["POST"])
+def debug_words():
+    # Utility endpoint to help debug word extraction
+    pdf_file = request.files.get("file")
+    if not pdf_file:
+        return jsonify({"error": "No file provided"}), 400
+    temp_path = os.path.join('/tmp', f"debug_temp_{int(time.time())}.pdf")
+    pdf_file.save(temp_path)
+    output = []
+    with pdfplumber.open(temp_path) as pdf:
+        for page_num, page in enumerate(pdf.pages):
+            words = page.extract_words(keep_blank_chars=True)
+            output.append({
+                "page": page_num,
+                "words": [w['text'] for w in words]
+            })
+    os.remove(temp_path)
+    return jsonify(output)
 
 @app.route("/redact", methods=["POST"])
 def redact_text():
