@@ -81,7 +81,6 @@ def locate_words_endpoint():
 
     pdf_file = request.files.get("file")
     words_to_redact = request.form.getlist("words")
-    print("Received words to redact:", words_to_redact)  # For debugging
 
     if not pdf_file:
         return jsonify({"error": "No file provided"}), 400
@@ -92,9 +91,8 @@ def locate_words_endpoint():
     pdf_file.save(temp_path)
     try:
         results = locate_words(temp_path, words_to_redact)
-        print("Locate words results:", results)  # For debugging
         os.remove(temp_path)
-        return jsonify(results)
+        return jsonify({"locations": results})   # <---- change here
     except Exception as e:
         os.remove(temp_path)
         return jsonify({"error": str(e)}), 500
