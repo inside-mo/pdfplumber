@@ -17,17 +17,14 @@ def health():
     return "OK", 200
 
 def locate_words(pdf_path, targets):
-    # import string  # Uncomment to strip punctuation
     found = []
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages):
             words = page.extract_words(keep_blank_chars=True)
             word_texts = [w['text'].strip() for w in words]
             word_texts_lower = [w.lower() for w in word_texts]
-            # word_texts_lower = [w.translate(str.maketrans('', '', string.punctuation)).lower() for w in word_texts]
             for target in targets:
                 target_clean = target.strip().lower()
-                # target_clean = target_clean.translate(str.maketrans('', '', string.punctuation))  # Uncomment to strip punctuation
                 target_words = [tw.strip() for tw in target_clean.split()]
                 if len(target_words) == 1:
                     # Single word match
@@ -87,7 +84,6 @@ def locate_words_endpoint():
 
 @app.route("/debug-words", methods=["POST"])
 def debug_words():
-    # Utility endpoint to help debug word extraction
     pdf_file = request.files.get("file")
     if not pdf_file:
         return jsonify({"error": "No file provided"}), 400
