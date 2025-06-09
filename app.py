@@ -94,7 +94,7 @@ def locate_words_endpoint():
         results = locate_words(temp_path, words_to_redact)
         print("Locate words results:", results)  # For debugging
         os.remove(temp_path)
-        return jsonify({"matches": results})
+        return jsonify(results)
     except Exception as e:
         os.remove(temp_path)
         return jsonify({"error": str(e)}), 500
