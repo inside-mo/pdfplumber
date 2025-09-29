@@ -16,6 +16,220 @@ def root():
 def health():
     return "OK", 200
 
+@app.route("/extract-sitecheck-protocol", methods=["POST"])
+def extract_sitecheck_protocol():
+    if request.headers.get("x-api-key") != API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    pdf_file = request.files.get("file")
+    if not pdf_file:
+        return jsonify({"error": "No file provided"}), 400
+    
+    try:
+        import re
+        
+        result = {
+            "document_header": {},
+            "site_info": {},
+            "sections": []
+        }
+        
+        with pdfplumber.open(pdf_file) as pdf:
+            # Extract header from first page
+            if len(pdf.pages) > 0:
+                first_page = pdf.pages[0]
+                first_page_text = first_page.extract_text() or ""
+                lines = first_page_text.split('\n')
+                
+                # Extract document header
+                for line in lines[:10]:
+                    line = line.strip()
+                    # Document ID pattern
+                    doc_id_match = re.match(r'^(\d{6})\s*-\s*(.+)$', line)
+                    if doc_id_match:
+                        result["document_header"]["document_id"] = doc_id_match.group(1)
+                        result["document_header"]["title"] = doc_id_match.group(2)
+                    # Organization
+                    if "Deutsche Glasfaser" in line:
+                        parts = line.split(" - ")
+                        result["document_header"]["organization"] = parts[0].strip()
+                        if len(parts) > 1:
+                            result["document_header"]["note"] = parts[1].strip()
+                
+                # Extract site info fields
+                field_patterns = [
+                    (r'(\d{4,6})\s*\n\s*Standort\s*\*', "standort"),
+                    (r'Record ID:\s*\*\s*\n\s*(\d+)', "record_id"),
+                    (r'Datum:\s*\*\s*\n\s*(\d{2}\.\d{2}\.\d{4})', "datum"),
+                    (r'POP \(Bundesland\):\s*\*\s*\n\s*([^\n]+)', "pop_bundesland"),
+                    (r'POP ID:\s*\*\s*\n\s*([^\n]+)', "pop_id"),
+                    (r'POP Typ:\s*\*\s*\n\s*([^\n]+)', "pop_typ"),
+                    (r'USV-Typ:\s*\*\s*\n\s*([^\n]+)', "usv_typ")
+                ]
+                
+                for pattern, field_key in field_patterns:
+                    match = re.search(pattern, first_page_text, re.IGNORECASE | re.MULTILINE)
+                    if match:
+                        result["site_info"][field_key] = match.group(1).strip()
+                
+                # Extract main status checkbox
+                status_options = ["Wartung erfolgreich", "Kein Zugang", "Standort existiert nicht"]
+                for option in status_options:
+                    if option in first_page_text:
+                        # Try to detect which one is marked using table data or visual analysis
+                        words = first_page.extract_words()
+                        for word in words:
+                            if word['text'] == option:
+                                # Check for checkbox mark indicators nearby
+                                # This is simplified - you may need more sophisticated detection
+                                x_before = word['x0'] - 30
+                                y_range = (word['top'] - 5, word['bottom'] + 5)
+                                
+                                # Look for marks in the checkbox area
+                                chars = first_page.chars
+                                for char in chars:
+                                    if (x_before < char['x0'] < word['x0'] and 
+                                        y_range[0] < char['top'] < y_range[1]):
+                                        if char['text'] in ['✓', 'X', '●', '■']:
+                                            result["site_info"]["status"] = option
+                                            break
+            
+            # Process all pages for sections
+            current_section = None
+            current_subsection = None
+            
+            for page_num, page in enumerate(pdf.pages):
+                page_text = page.extract_text() or ""
+                tables = page.extract_tables() or []
+                
+                # Extract sections and subsections
+                lines = page_text.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    
+                    # Main section headers
+                    section_match = re.match(r'^(\d+)\.\s+(.+)$', line)
+                    if section_match:
+                        current_section = {
+                            "number": section_match.group(1),
+                            "title": section_match.group(2),
+                            "subsections": [],
+                            "page": page_num + 1
+                        }
+                        result["sections"].append(current_section)
+                        current_subsection = None
+                        continue
+                    
+                    # Subsection headers
+                    subsection_match = re.match(r'^(\d+\.\d+)\s+(.+)$', line)
+                    if subsection_match and current_section:
+                        current_subsection = {
+                            "number": subsection_match.group(1),
+                            "title": subsection_match.group(2),
+                            "items": [],
+                            "page": page_num + 1
+                        }
+                        current_section["subsections"].append(current_subsection)
+                        continue
+                    
+                    # Image references
+                    if re.match(r'^\d+\.jpg$', line, re.IGNORECASE):
+                        if current_subsection:
+                            if "images" not in current_subsection:
+                                current_subsection["images"] = []
+                            current_subsection["images"].append(line)
+                    
+                    # Special fields
+                    if line.endswith("*") and current_subsection:
+                        field_name = line.replace("*", "").strip()
+                        # Look for value in next line
+                        line_idx = lines.index(line)
+                        if line_idx + 1 < len(lines):
+                            value = lines[line_idx + 1].strip()
+                            if value and not value.endswith("*"):
+                                field_key = field_name.lower().replace(" ", "_").replace("-", "_")
+                                current_subsection[field_key] = value
+                    
+                    # PoP Status detection
+                    if "PoP Status" in line and current_subsection:
+                        # Look for Status 7/9 in following lines
+                        line_idx = lines.index(line)
+                        for i in range(line_idx + 1, min(line_idx + 3, len(lines))):
+                            if "Status 7" in lines[i] or "Status 9" in lines[i]:
+                                # Try to detect which is marked
+                                words = page.extract_words()
+                                for status_num in ["7", "9"]:
+                                    status_text = f"Status {status_num}"
+                                    for word in words:
+                                        if status_text in word['text']:
+                                            # Check for mark nearby
+                                            # This is a simplified check
+                                            current_subsection["pop_status"] = status_text
+                                            break
+                                break
+                
+                # Process tables for checkbox items
+                if current_subsection and tables:
+                    for table in tables:
+                        if not table or len(table) < 2:
+                            continue
+                        
+                        # Check if this is a checkbox table
+                        headers = table[0] if table else []
+                        if any("OK" in str(h) and "Nicht OK" in str(h) for h in headers):
+                            # Find column indices
+                            ok_col = nicht_ok_col = nicht_notwendig_col = None
+                            for i, header in enumerate(headers):
+                                header_str = str(header) if header else ""
+                                if header_str == "OK":
+                                    ok_col = i
+                                elif "Nicht OK" in header_str:
+                                    nicht_ok_col = i
+                                elif "Nicht notwendig" in header_str or "notwendig" in header_str:
+                                    nicht_notwendig_col = i
+                            
+                            # Process rows
+                            for row in table[1:]:
+                                if len(row) < 2:
+                                    continue
+                                
+                                # Extract item number and description
+                                item_text = str(row[0]) if row[0] else ""
+                                desc_text = str(row[1]) if len(row) > 1 and row[1] else ""
+                                
+                                # Combine if needed
+                                full_text = f"{item_text} {desc_text}".strip()
+                                item_match = re.match(r'^(\d+\.\d+\.\d+)\s+(.+)$', full_text)
+                                
+                                if item_match and item_match.group(1).startswith(current_subsection["number"] + "."):
+                                    status = "Not checked"
+                                    
+                                    # Check which column has a mark
+                                    # Look for non-empty cells or specific markers
+                                    if ok_col is not None and len(row) > ok_col:
+                                        if row[ok_col] and str(row[ok_col]).strip() not in ["", "OK"]:
+                                            status = "OK"
+                                    if nicht_ok_col is not None and len(row) > nicht_ok_col:
+                                        if row[nicht_ok_col] and str(row[nicht_ok_col]).strip() not in ["", "Nicht OK"]:
+                                            status = "Nicht OK"
+                                    if nicht_notwendig_col is not None and len(row) > nicht_notwendig_col:
+                                        if row[nicht_notwendig_col] and str(row[nicht_notwendig_col]).strip() not in ["", "Nicht notwendig", "notwendig"]:
+                                            status = "Nicht notwendig"
+                                    
+                                    current_subsection["items"].append({
+                                        "number": item_match.group(1),
+                                        "description": item_match.group(2).strip(),
+                                        "status": status,
+                                        "page": page_num + 1
+                                    })
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 def locate_words(pdf_path, targets):
     found = []
     with pdfplumber.open(pdf_path) as pdf:
