@@ -72,27 +72,57 @@ def extract_sitecheck_protocol():
                     if match:
                         result["site_info"][field_key] = match.group(1).strip()
                 
-                # Extract main status checkbox
+                # Extract main status checkbox using advanced detection
                 status_options = ["Wartung erfolgreich", "Kein Zugang", "Standort existiert nicht"]
-                for option in status_options:
-                    if option in first_page_text:
-                        # Try to detect which one is marked using table data or visual analysis
-                        words = first_page.extract_words()
-                        for word in words:
-                            if word['text'] == option:
-                                # Check for checkbox mark indicators nearby
-                                # This is simplified - you may need more sophisticated detection
-                                x_before = word['x0'] - 30
-                                y_range = (word['top'] - 5, word['bottom'] + 5)
-                                
-                                # Look for marks in the checkbox area
-                                chars = first_page.chars
+                
+                # Method 1: Check for form annotations
+                if hasattr(first_page, 'annots') and first_page.annots:
+                    for annot in first_page.annots:
+                        if annot.get('data', {}).get('V'):  # Check if annotation has a value
+                            for option in status_options:
+                                if option in str(annot.get('data', {})):
+                                    result["site_info"]["status"] = option
+                                    break
+                
+                # Method 2: Look for visual indicators of checked boxes
+                if "status" not in result["site_info"]:
+                    # Get all characters and look for checkbox markers
+                    chars_df = first_page.chars
+                    if chars_df is not None and len(chars_df) > 0:
+                        # Convert to list of dictionaries if it's a DataFrame
+                        if hasattr(chars_df, 'to_dict'):
+                            chars = chars_df.to_dict('records')
+                        else:
+                            chars = chars_df
+                        
+                        for option in status_options:
+                            # Find the position of each option
+                            option_words = first_page.search(option)
+                            if option_words:
+                                option_pos = option_words[0]
+                                # Look for checkbox markers (✓, X, ■, ●) to the left of the option
                                 for char in chars:
-                                    if (x_before < char['x0'] < word['x0'] and 
-                                        y_range[0] < char['top'] < y_range[1]):
-                                        if char['text'] in ['✓', 'X', '●', '■']:
+                                    if (char.get('x0', 0) < option_pos['x0'] - 5 and 
+                                        char.get('x0', 0) > option_pos['x0'] - 30 and
+                                        abs(char.get('top', 0) - option_pos['top']) < 5):
+                                        if char.get('text', '') in ['✓', 'X', '■', '●', 'x', '✔', '✗']:
                                             result["site_info"]["status"] = option
                                             break
+                
+                # Method 3: Check rects/curves for filled checkboxes
+                if "status" not in result["site_info"] and hasattr(first_page, 'rects'):
+                    for option in status_options:
+                        option_words = first_page.search(option)
+                        if option_words:
+                            option_pos = option_words[0]
+                            # Look for filled rectangles near the option
+                            for rect in first_page.rects:
+                                if (rect.get('x0', 0) < option_pos['x0'] - 5 and 
+                                    rect.get('x0', 0) > option_pos['x0'] - 30 and
+                                    abs(rect.get('top', 0) - option_pos['top']) < 10 and
+                                    rect.get('fill', False)):  # Check if rectangle is filled
+                                    result["site_info"]["status"] = option
+                                    break
             
             # Process all pages for sections
             current_section = None
@@ -104,7 +134,7 @@ def extract_sitecheck_protocol():
                 
                 # Extract sections and subsections
                 lines = page_text.split('\n')
-                for line in lines:
+                for line_idx, line in enumerate(lines):
                     line = line.strip()
                     
                     # Main section headers
@@ -143,7 +173,6 @@ def extract_sitecheck_protocol():
                     if line.endswith("*") and current_subsection:
                         field_name = line.replace("*", "").strip()
                         # Look for value in next line
-                        line_idx = lines.index(line)
                         if line_idx + 1 < len(lines):
                             value = lines[line_idx + 1].strip()
                             if value and not value.endswith("*"):
@@ -153,22 +182,58 @@ def extract_sitecheck_protocol():
                     # PoP Status detection
                     if "PoP Status" in line and current_subsection:
                         # Look for Status 7/9 in following lines
-                        line_idx = lines.index(line)
                         for i in range(line_idx + 1, min(line_idx + 3, len(lines))):
-                            if "Status 7" in lines[i] or "Status 9" in lines[i]:
-                                # Try to detect which is marked
-                                words = page.extract_words()
-                                for status_num in ["7", "9"]:
-                                    status_text = f"Status {status_num}"
-                                    for word in words:
-                                        if status_text in word['text']:
-                                            # Check for mark nearby
-                                            # This is a simplified check
-                                            current_subsection["pop_status"] = status_text
-                                            break
+                            if i < len(lines) and ("Status 7" in lines[i] or "Status 9" in lines[i]):
+                                # Detect which status is checked
+                                status_line = lines[i]
+                                
+                                # Method 1: Check for visual markers in the line
+                                if "✓" in status_line or "X" in status_line or "■" in status_line:
+                                    if "Status 7" in status_line and any(marker in status_line.split("Status 7")[0] for marker in ["✓", "X", "■"]):
+                                        current_subsection["pop_status"] = "Status 7"
+                                    elif "Status 9" in status_line and any(marker in status_line.split("Status 9")[0] for marker in ["✓", "X", "■"]):
+                                        current_subsection["pop_status"] = "Status 9"
+                                else:
+                                    # Method 2: Check page elements
+                                    status_7_pos = page.search("Status 7")
+                                    status_9_pos = page.search("Status 9")
+                                    
+                                    # Check for filled shapes near each status
+                                    if hasattr(page, 'rects'):
+                                        for rect in page.rects:
+                                            if rect.get('fill', False):  # Only filled rectangles
+                                                if status_7_pos and (
+                                                    rect['x0'] < status_7_pos[0]['x0'] - 5 and 
+                                                    rect['x0'] > status_7_pos[0]['x0'] - 30 and
+                                                    abs(rect['top'] - status_7_pos[0]['top']) < 10):
+                                                    current_subsection["pop_status"] = "Status 7"
+                                                elif status_9_pos and (
+                                                    rect['x0'] < status_9_pos[0]['x0'] - 5 and 
+                                                    rect['x0'] > status_9_pos[0]['x0'] - 30 and
+                                                    abs(rect['top'] - status_9_pos[0]['top']) < 10):
+                                                    current_subsection["pop_status"] = "Status 9"
                                 break
+                    
+                    # ZAS Schlüssel detection
+                    if "ZAS Schlüssel" in line and current_subsection:
+                        # Similar detection logic for ZAS options
+                        zas_key = "zas_schluessel"
+                        if "2.4.2" in line:
+                            zas_key = "zas_schluessel"
+                        elif "2.4.3" in line:
+                            zas_key = "zas_schluessel_vor_ort"
+                        
+                        # Look for options in next lines
+                        for i in range(line_idx + 1, min(line_idx + 4, len(lines))):
+                            if i < len(lines):
+                                option_line = lines[i]
+                                if "Schlüssel" in option_line:
+                                    # Check for markers
+                                    if any(marker in option_line for marker in ["✓", "X", "■", "●"]):
+                                        current_subsection[zas_key] = option_line.replace("✓", "").replace("X", "").replace("■", "").replace("●", "").strip()
+                                        break
                 
-                # Process tables for checkbox items
+                # Process tables for checkbox items with improved detection
                 if current_subsection and tables:
                     for table in tables:
                         if not table or len(table) < 2:
@@ -202,19 +267,42 @@ def extract_sitecheck_protocol():
                                 item_match = re.match(r'^(\d+\.\d+\.\d+)\s+(.+)$', full_text)
                                 
                                 if item_match and item_match.group(1).startswith(current_subsection["number"] + "."):
+                                    # Determine status based on cell content
+                                    # Look for any non-empty content or markers in the cells
                                     status = "Not checked"
                                     
-                                    # Check which column has a mark
-                                    # Look for non-empty cells or specific markers
+                                    # Check each column for marks
                                     if ok_col is not None and len(row) > ok_col:
-                                        if row[ok_col] and str(row[ok_col]).strip() not in ["", "OK"]:
+                                        cell_content = str(row[ok_col]).strip()
+                                        # Check for any marker indicating selection
+                                        if cell_content and cell_content not in ["", "OK", "-", " "]:
                                             status = "OK"
+                                    
                                     if nicht_ok_col is not None and len(row) > nicht_ok_col:
-                                        if row[nicht_ok_col] and str(row[nicht_ok_col]).strip() not in ["", "Nicht OK"]:
+                                        cell_content = str(row[nicht_ok_col]).strip()
+                                        if cell_content and cell_content not in ["", "Nicht OK", "-", " "]:
                                             status = "Nicht OK"
+                                    
                                     if nicht_notwendig_col is not None and len(row) > nicht_notwendig_col:
-                                        if row[nicht_notwendig_col] and str(row[nicht_notwendig_col]).strip() not in ["", "Nicht notwendig", "notwendig"]:
+                                        cell_content = str(row[nicht_notwendig_col]).strip()
+                                        if cell_content and cell_content not in ["", "Nicht notwendig", "notwendig", "-", " "]:
                                             status = "Nicht notwendig"
+                                    
+                                    # If still not detected, check the full row text for markers
+                                    full_row_text = " ".join(str(cell) for cell in row)
+                                    if status == "Not checked":
+                                        if any(marker in full_row_text for marker in ["✓", "X", "■", "●", "✔"]):
+                                            # Find which column has the marker
+                                            for i, cell in enumerate(row):
+                                                cell_str = str(cell)
+                                                if any(marker in cell_str for marker in ["✓", "X", "■", "●", "✔"]):
+                                                    if i == ok_col:
+                                                        status = "OK"
+                                                    elif i == nicht_ok_col:
+                                                        status = "Nicht OK"
+                                                    elif i == nicht_notwendig_col:
+                                                        status = "Nicht notwendig"
+                                                    break
                                     
                                     current_subsection["items"].append({
                                         "number": item_match.group(1),
