@@ -16,6 +16,44 @@ def root():
 def health():
     return "OK", 200
 
+import base64
+from pdfplumber.utils import extract_image
+
+@app.route("/extract-images", methods=["POST"])
+def extract_images():
+    if request.headers.get("x-api-key") != API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    pdf_file = request.files.get("file")
+    if not pdf_file:
+        return jsonify({"error": "No file provided"}), 400
+
+    try:
+        images_out = []
+        with pdfplumber.open(pdf_file) as pdf:
+            seen = set()
+            for page_num, page in enumerate(pdf.pages, 1):
+                for img in page.images:
+                    name = img.get("name")
+                    if not name or name in seen:
+                        continue
+                    seen.add(name)
+                    obj = page.objects["image"][name]
+                    extracted = extract_image(obj)
+                    img_bytes = extracted.get("image")
+                    img_ext = extracted.get("ext")
+                    if not img_bytes:
+                        continue
+                    images_out.append({
+                        "page": page_num,
+                        "name": name,
+                        "ext": img_ext,
+                        "data_base64": base64.b64encode(img_bytes).decode("utf-8")
+                    })
+        return jsonify({"images": images_out})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/extract-sitecheck-protocol", methods=["POST"])
 def extract_sitecheck_protocol():
     if request.headers.get("x-api-key") != API_KEY:
