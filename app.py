@@ -27,32 +27,60 @@ except ImportError:
             return [_literal_name(f) for f in filters]
         return [_literal_name(filters)]
 
-    def extract_image(obj):
-        stream = obj.get("stream")
-        if stream is None:
-            return {"image": None, "ext": None}
-        stream = resolve1(stream)
-        data = stream.get_data()
-        filters = _stream_filters(stream)
-        ext = "bin"
-        for flt in filters:
-            if flt == "DCTDecode":
-                ext = "jpg"
-                break
-            if flt == "JPXDecode":
-                ext = "jp2"
-                break
-            if flt in ("CCITTFaxDecode", "CCFDecode"):
-                ext = "tiff"
-                break
-            if flt in ("FlateDecode", "LZWDecode"):
-                ext = "png"
-                break
-        return {"image": data, "ext": ext}
+    @app.route("/extract-images", methods=["POST"])
+def extract_images():
+    if request.headers.get("x-api-key") != API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
 
-app = Flask(__name__)
-API_KEY = os.environ.get("API_KEY")
-PORT = int(os.environ.get("PORT", 9546))
+    pdf_file = request.files.get("file")
+    if not pdf_file:
+        return jsonify({"error": "No file provided"}), 400
+
+    try:
+        images_out = []
+        with pdfplumber.open(pdf_file) as pdf:
+            seen = set()
+            for page_num, page in enumerate(pdf.pages, 1):
+                raw_image_objs = getattr(page, "objects", None)
+
+                if raw_image_objs and hasattr(raw_image_objs, "get"):
+                    image_objects = raw_image_objs.get("image", {}) or {}
+                else:
+                    candidates = raw_image_objs if isinstance(raw_image_objs, list) else []
+                    image_objects = {
+                        obj.get("name"): obj
+                        for obj in candidates
+                        if isinstance(obj, dict)
+                        and obj.get("object_type") == "image"
+                        and obj.get("name")
+                    }
+
+                for img in page.images:
+                    name = img.get("name")
+                    if not name or name in seen:
+                        continue
+                    seen.add(name)
+
+                    obj = image_objects.get(name)
+                    if not obj:
+                        continue
+
+                    extracted = extract_image(obj)
+                    img_bytes = extracted.get("image")
+                    if not img_bytes:
+                        continue
+
+                    img_ext = extracted.get("ext") or "bin"
+                    images_out.append({
+                        "page": page_num,
+                        "name": name,
+                        "ext": img_ext,
+                        "data_base64": base64.b64encode(img_bytes).decode("utf-8")
+                    })
+
+        return jsonify({"images": images_out})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/", methods=["GET"])
 def root():
