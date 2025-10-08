@@ -1,10 +1,55 @@
 from flask import Flask, request, jsonify
 import os
 import time
+import base64
 import pdfplumber
 
-app = Flask(__name__)
+try:
+    from pdfplumber.utils import extract_image
+except ImportError:  # pdfplumber < 0.11 fallback
+    from pdfminer.pdftypes import resolve1
+    from pdfminer.psparser import PSLiteral, PSKeyword
 
+    def _literal_name(val):
+        if isinstance(val, (PSLiteral, PSKeyword)):
+            return val.name
+        if isinstance(val, bytes):
+            return val.decode("latin-1")
+        return str(val)
+
+    def _stream_filters(stream):
+        filters = stream.attrs.get("Filter")
+        if not filters:
+            return []
+        filters = resolve1(filters)
+        if isinstance(filters, list):
+            return [_literal_name(f) for f in filters]
+        return [_literal_name(filters)]
+
+    def extract_image(obj):
+        stream = obj.get("stream")
+        if stream is None:
+            return {"image": None, "ext": None}
+        stream = resolve1(stream)
+        data = stream.get_data()
+        filters = _stream_filters(stream)
+        ext = "bin"
+        for flt in filters:
+            if flt == "DCTDecode":
+                ext = "jpg"
+                break
+            if flt == "JPXDecode":
+                ext = "jp2"
+                break
+            if flt in ("CCITTFaxDecode", "CCFDecode"):
+                ext = "tiff"
+                break
+            if flt in ("FlateDecode", "LZWDecode"):
+                ext = "png"
+                break
+        return {"image": data, "ext": ext}
+
+app = Flask(__name__)
 API_KEY = os.environ.get("API_KEY")
 PORT = int(os.environ.get("PORT", 9546))
 
@@ -16,85 +61,42 @@ def root():
 def health():
     return "OK", 200
 
-import base64
-from pdfplumber.utils import extract_image
-
-@app.route("/extract-images", methods=["POST"])
-def extract_images():
-    if request.headers.get("x-api-key") != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    pdf_file = request.files.get("file")
-    if not pdf_file:
-        return jsonify({"error": "No file provided"}), 400
-
-    try:
-        images_out = []
-        with pdfplumber.open(pdf_file) as pdf:
-            seen = set()
-            for page_num, page in enumerate(pdf.pages, 1):
-                for img in page.images:
-                    name = img.get("name")
-                    if not name or name in seen:
-                        continue
-                    seen.add(name)
-                    obj = page.objects["image"][name]
-                    extracted = extract_image(obj)
-                    img_bytes = extracted.get("image")
-                    img_ext = extracted.get("ext")
-                    if not img_bytes:
-                        continue
-                    images_out.append({
-                        "page": page_num,
-                        "name": name,
-                        "ext": img_ext,
-                        "data_base64": base64.b64encode(img_bytes).decode("utf-8")
-                    })
-        return jsonify({"images": images_out})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 @app.route("/extract-sitecheck-protocol", methods=["POST"])
 def extract_sitecheck_protocol():
     if request.headers.get("x-api-key") != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
-    
+
     pdf_file = request.files.get("file")
     if not pdf_file:
         return jsonify({"error": "No file provided"}), 400
-    
+
     try:
         import re
-        
+
         result = {
             "document_header": {},
             "site_info": {},
             "sections": []
         }
-        
+
         with pdfplumber.open(pdf_file) as pdf:
-            # Extract header from first page
             if len(pdf.pages) > 0:
                 first_page = pdf.pages[0]
                 first_page_text = first_page.extract_text() or ""
                 lines = first_page_text.split('\n')
-                
-                # Extract document header
+
                 for line in lines[:10]:
                     line = line.strip()
-                    # Document ID pattern
                     doc_id_match = re.match(r'^(\d{6})\s*-\s*(.+)$', line)
                     if doc_id_match:
                         result["document_header"]["document_id"] = doc_id_match.group(1)
                         result["document_header"]["title"] = doc_id_match.group(2)
-                    # Organization
                     if "Deutsche Glasfaser" in line:
                         parts = line.split(" - ")
                         result["document_header"]["organization"] = parts[0].strip()
                         if len(parts) > 1:
                             result["document_header"]["note"] = parts[1].strip()
-                
-                # Extract site info fields
+
                 field_patterns = [
                     (r'(\d{4,6})\s*\n\s*Standort\s*\*', "standort"),
                     (r'Record ID:\s*\*\s*\n\s*(\d+)', "record_id"),
@@ -104,78 +106,66 @@ def extract_sitecheck_protocol():
                     (r'POP Typ:\s*\*\s*\n\s*([^\n]+)', "pop_typ"),
                     (r'USV-Typ:\s*\*\s*\n\s*([^\n]+)', "usv_typ")
                 ]
-                
+
                 for pattern, field_key in field_patterns:
                     match = re.search(pattern, first_page_text, re.IGNORECASE | re.MULTILINE)
                     if match:
                         result["site_info"][field_key] = match.group(1).strip()
-                
-                # Extract main status checkbox using advanced detection
+
                 status_options = ["Wartung erfolgreich", "Kein Zugang", "Standort existiert nicht"]
-                
-                # Method 1: Check for form annotations
+
                 if hasattr(first_page, 'annots') and first_page.annots:
                     for annot in first_page.annots:
-                        if annot.get('data', {}).get('V'):  # Check if annotation has a value
+                        if annot.get('data', {}).get('V'):
                             for option in status_options:
                                 if option in str(annot.get('data', {})):
                                     result["site_info"]["status"] = option
                                     break
-                
-                # Method 2: Look for visual indicators of checked boxes
+
                 if "status" not in result["site_info"]:
-                    # Get all characters and look for checkbox markers
                     chars_df = first_page.chars
                     if chars_df is not None and len(chars_df) > 0:
-                        # Convert to list of dictionaries if it's a DataFrame
                         if hasattr(chars_df, 'to_dict'):
                             chars = chars_df.to_dict('records')
                         else:
                             chars = chars_df
-                        
+
                         for option in status_options:
-                            # Find the position of each option
                             option_words = first_page.search(option)
                             if option_words:
                                 option_pos = option_words[0]
-                                # Look for checkbox markers (✓, X, ■, ●) to the left of the option
                                 for char in chars:
-                                    if (char.get('x0', 0) < option_pos['x0'] - 5 and 
+                                    if (char.get('x0', 0) < option_pos['x0'] - 5 and
                                         char.get('x0', 0) > option_pos['x0'] - 30 and
                                         abs(char.get('top', 0) - option_pos['top']) < 5):
                                         if char.get('text', '') in ['✓', 'X', '■', '●', 'x', '✔', '✗']:
                                             result["site_info"]["status"] = option
                                             break
-                
-                # Method 3: Check rects/curves for filled checkboxes
+
                 if "status" not in result["site_info"] and hasattr(first_page, 'rects'):
                     for option in status_options:
                         option_words = first_page.search(option)
                         if option_words:
                             option_pos = option_words[0]
-                            # Look for filled rectangles near the option
                             for rect in first_page.rects:
-                                if (rect.get('x0', 0) < option_pos['x0'] - 5 and 
+                                if (rect.get('x0', 0) < option_pos['x0'] - 5 and
                                     rect.get('x0', 0) > option_pos['x0'] - 30 and
                                     abs(rect.get('top', 0) - option_pos['top']) < 10 and
-                                    rect.get('fill', False)):  # Check if rectangle is filled
+                                    rect.get('fill', False)):
                                     result["site_info"]["status"] = option
                                     break
-            
-            # Process all pages for sections
+
             current_section = None
             current_subsection = None
-            
+
             for page_num, page in enumerate(pdf.pages):
                 page_text = page.extract_text() or ""
                 tables = page.extract_tables() or []
-                
-                # Extract sections and subsections
+
                 lines = page_text.split('\n')
                 for line_idx, line in enumerate(lines):
                     line = line.strip()
-                    
-                    # Main section headers
+
                     section_match = re.match(r'^(\d+)\.\s+(.+)$', line)
                     if section_match:
                         current_section = {
@@ -187,8 +177,7 @@ def extract_sitecheck_protocol():
                         result["sections"].append(current_section)
                         current_subsection = None
                         continue
-                    
-                    # Subsection headers
+
                     subsection_match = re.match(r'^(\d+\.\d+)\s+(.+)$', line)
                     if subsection_match and current_section:
                         current_subsection = {
@@ -199,88 +188,64 @@ def extract_sitecheck_protocol():
                         }
                         current_section["subsections"].append(current_subsection)
                         continue
-                    
-                    # Image references
+
                     if re.match(r'^\d+\.jpg$', line, re.IGNORECASE):
                         if current_subsection:
-                            if "images" not in current_subsection:
-                                current_subsection["images"] = []
-                            current_subsection["images"].append(line)
-                    
-                    # Special fields
+                            current_subsection.setdefault("images", []).append(line)
+
                     if line.endswith("*") and current_subsection:
                         field_name = line.replace("*", "").strip()
-                        # Look for value in next line
                         if line_idx + 1 < len(lines):
                             value = lines[line_idx + 1].strip()
                             if value and not value.endswith("*"):
                                 field_key = field_name.lower().replace(" ", "_").replace("-", "_")
                                 current_subsection[field_key] = value
-                    
-                    # PoP Status detection
+
                     if "PoP Status" in line and current_subsection:
-                        # Look for Status 7/9 in following lines
                         for i in range(line_idx + 1, min(line_idx + 3, len(lines))):
                             if i < len(lines) and ("Status 7" in lines[i] or "Status 9" in lines[i]):
-                                # Detect which status is checked
                                 status_line = lines[i]
-                                
-                                # Method 1: Check for visual markers in the line
                                 if "✓" in status_line or "X" in status_line or "■" in status_line:
                                     if "Status 7" in status_line and any(marker in status_line.split("Status 7")[0] for marker in ["✓", "X", "■"]):
                                         current_subsection["pop_status"] = "Status 7"
                                     elif "Status 9" in status_line and any(marker in status_line.split("Status 9")[0] for marker in ["✓", "X", "■"]):
                                         current_subsection["pop_status"] = "Status 9"
                                 else:
-                                    # Method 2: Check page elements
                                     status_7_pos = page.search("Status 7")
                                     status_9_pos = page.search("Status 9")
-                                    
-                                    # Check for filled shapes near each status
+
                                     if hasattr(page, 'rects'):
                                         for rect in page.rects:
-                                            if rect.get('fill', False):  # Only filled rectangles
+                                            if rect.get('fill', False):
                                                 if status_7_pos and (
-                                                    rect['x0'] < status_7_pos[0]['x0'] - 5 and 
+                                                    rect['x0'] < status_7_pos[0]['x0'] - 5 and
                                                     rect['x0'] > status_7_pos[0]['x0'] - 30 and
                                                     abs(rect['top'] - status_7_pos[0]['top']) < 10):
                                                     current_subsection["pop_status"] = "Status 7"
                                                 elif status_9_pos and (
-                                                    rect['x0'] < status_9_pos[0]['x0'] - 5 and 
+                                                    rect['x0'] < status_9_pos[0]['x0'] - 5 and
                                                     rect['x0'] > status_9_pos[0]['x0'] - 30 and
                                                     abs(rect['top'] - status_9_pos[0]['top']) < 10):
                                                     current_subsection["pop_status"] = "Status 9"
                                 break
-                    
-                    # ZAS Schlüssel detection
+
                     if "ZAS Schlüssel" in line and current_subsection:
-                        # Similar detection logic for ZAS options
-                        zas_key = "zas_schluessel"
-                        if "2.4.2" in line:
-                            zas_key = "zas_schluessel"
-                        elif "2.4.3" in line:
-                            zas_key = "zas_schluessel_vor_ort"
-                        
-                        # Look for options in next lines
+                        zas_key = "zas_schluessel" if "2.4.2" in line else "zas_schluessel_vor_ort"
                         for i in range(line_idx + 1, min(line_idx + 4, len(lines))):
                             if i < len(lines):
                                 option_line = lines[i]
                                 if "Schlüssel" in option_line:
-                                    # Check for markers
                                     if any(marker in option_line for marker in ["✓", "X", "■", "●"]):
-                                        current_subsection[zas_key] = option_line.replace("✓", "").replace("X", "").replace("■", "").replace("●", "").strip()
+                                        value = option_line.replace("✓", "").replace("X", "").replace("■", "").replace("●", "").strip()
+                                        current_subsection[zas_key] = value
                                         break
-                
-                # Process tables for checkbox items with improved detection
+
                 if current_subsection and tables:
                     for table in tables:
                         if not table or len(table) < 2:
                             continue
-                        
-                        # Check if this is a checkbox table
                         headers = table[0] if table else []
                         if any("OK" in str(h) and "Nicht OK" in str(h) for h in headers):
-                            # Find column indices
                             ok_col = nicht_ok_col = nicht_notwendig_col = None
                             for i, header in enumerate(headers):
                                 header_str = str(header) if header else ""
@@ -290,47 +255,37 @@ def extract_sitecheck_protocol():
                                     nicht_ok_col = i
                                 elif "Nicht notwendig" in header_str or "notwendig" in header_str:
                                     nicht_notwendig_col = i
-                            
-                            # Process rows
+
                             for row in table[1:]:
                                 if len(row) < 2:
                                     continue
-                                
-                                # Extract item number and description
+
                                 item_text = str(row[0]) if row[0] else ""
                                 desc_text = str(row[1]) if len(row) > 1 and row[1] else ""
-                                
-                                # Combine if needed
                                 full_text = f"{item_text} {desc_text}".strip()
                                 item_match = re.match(r'^(\d+\.\d+\.\d+)\s+(.+)$', full_text)
-                                
+
                                 if item_match and item_match.group(1).startswith(current_subsection["number"] + "."):
-                                    # Determine status based on cell content
-                                    # Look for any non-empty content or markers in the cells
                                     status = "Not checked"
-                                    
-                                    # Check each column for marks
+
                                     if ok_col is not None and len(row) > ok_col:
                                         cell_content = str(row[ok_col]).strip()
-                                        # Check for any marker indicating selection
                                         if cell_content and cell_content not in ["", "OK", "-", " "]:
                                             status = "OK"
-                                    
+
                                     if nicht_ok_col is not None and len(row) > nicht_ok_col:
                                         cell_content = str(row[nicht_ok_col]).strip()
                                         if cell_content and cell_content not in ["", "Nicht OK", "-", " "]:
                                             status = "Nicht OK"
-                                    
+
                                     if nicht_notwendig_col is not None and len(row) > nicht_notwendig_col:
                                         cell_content = str(row[nicht_notwendig_col]).strip()
                                         if cell_content and cell_content not in ["", "Nicht notwendig", "notwendig", "-", " "]:
                                             status = "Nicht notwendig"
-                                    
-                                    # If still not detected, check the full row text for markers
+
                                     full_row_text = " ".join(str(cell) for cell in row)
                                     if status == "Not checked":
                                         if any(marker in full_row_text for marker in ["✓", "X", "■", "●", "✔"]):
-                                            # Find which column has the marker
                                             for i, cell in enumerate(row):
                                                 cell_str = str(cell)
                                                 if any(marker in cell_str for marker in ["✓", "X", "■", "●", "✔"]):
@@ -341,16 +296,16 @@ def extract_sitecheck_protocol():
                                                     elif i == nicht_notwendig_col:
                                                         status = "Nicht notwendig"
                                                     break
-                                    
+
                                     current_subsection["items"].append({
                                         "number": item_match.group(1),
                                         "description": item_match.group(2).strip(),
                                         "status": status,
                                         "page": page_num + 1
                                     })
-        
+
         return jsonify(result)
-        
+
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -367,7 +322,6 @@ def locate_words(pdf_path, targets):
                 target_clean = target.strip().lower()
                 target_words = [tw.strip() for tw in target_clean.split()]
                 if len(target_words) == 1:
-                    # Single word match: substring (handles phrases as a single extracted word)
                     for i, w in enumerate(word_texts_lower):
                         if target_words[0] in w:
                             word = words[i]
@@ -382,7 +336,6 @@ def locate_words(pdf_path, targets):
                                 "page_height": page.height
                             })
                 else:
-                    # Multi-word: match if phrase appears as a single extracted word
                     joined_target = " ".join(target_words)
                     for i, w in enumerate(word_texts_lower):
                         if w == joined_target:
@@ -397,7 +350,6 @@ def locate_words(pdf_path, targets):
                                 "page_width": page.width,
                                 "page_height": page.height
                             })
-                    # Also, try to match as a sequence of separate words
                     for i in range(len(word_texts_lower) - len(target_words) + 1):
                         if word_texts_lower[i:i+len(target_words)] == target_words:
                             first = words[i]
@@ -418,21 +370,18 @@ def locate_words(pdf_path, targets):
 def locate_words_endpoint():
     if request.headers.get("x-api-key") != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
-
     pdf_file = request.files.get("file")
     words_to_redact = request.form.getlist("words")
-
     if not pdf_file:
         return jsonify({"error": "No file provided"}), 400
     if not words_to_redact:
         return jsonify({"error": "No words provided"}), 400
-
     temp_path = os.path.join('/tmp', f"pdfplumber_temp_{int(time.time())}.pdf")
     pdf_file.save(temp_path)
     try:
         results = locate_words(temp_path, words_to_redact)
         os.remove(temp_path)
-        return jsonify({"locations": results})   # <---- change here
+        return jsonify({"locations": results})
     except Exception as e:
         os.remove(temp_path)
         return jsonify({"error": str(e)}), 500
@@ -459,16 +408,12 @@ def debug_words():
 def redact_text():
     if request.headers.get("x-api-key") != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
-
     pdf_file = request.files.get("file")
     field_name = request.form.get("fieldName")
-
     if not pdf_file:
         return jsonify({"error": "No file provided"}), 400
-
     if not field_name:
         return jsonify({"error": "No field name provided"}), 400
-
     try:
         with pdfplumber.open(pdf_file) as pdf:
             results = []
@@ -507,11 +452,9 @@ def extract_text():
 def extract_all():
     if request.headers.get("x-api-key") != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
-
     pdf_file = request.files.get("file")
     if not pdf_file:
         return jsonify({"error": "No file provided"}), 400
-
     try:
         import pandas as pd
         result = {
@@ -519,7 +462,6 @@ def extract_all():
             "tables": [],
             "combined": []
         }
-
         with pdfplumber.open(pdf_file) as pdf:
             for page_num, page in enumerate(pdf.pages, 1):
                 text = page.extract_text() or ""
@@ -535,6 +477,7 @@ def extract_all():
                     safe_table = [[cell or "" for cell in row] for row in table]
                     headers = safe_table[0] if safe_table else []
                     data = safe_table[1:] if len(safe_table) > 1 else []
+                    import pandas as pd
                     df = pd.DataFrame(data, columns=headers)
                     table_data = {
                         "table_number": i,
@@ -571,10 +514,49 @@ def extract_all():
                     "elements": elements
                 })
         return jsonify(result)
-
     except Exception as e:
         import traceback
         traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/extract-images", methods=["POST"])
+def extract_images():
+    if request.headers.get("x-api-key") != API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    pdf_file = request.files.get("file")
+    if not pdf_file:
+        return jsonify({"error": "No file provided"}), 400
+
+    try:
+        images_out = []
+        with pdfplumber.open(pdf_file) as pdf:
+            seen = set()
+            for page_num, page in enumerate(pdf.pages, 1):
+                image_objects = page.objects.get("image", {})
+                for img in page.images:
+                    name = img.get("name")
+                    if not name:
+                        continue
+                    if name in seen:
+                        continue
+                    seen.add(name)
+                    obj = image_objects.get(name)
+                    if not obj:
+                        continue
+                    extracted = extract_image(obj)
+                    img_bytes = extracted.get("image")
+                    img_ext = extracted.get("ext") or "bin"
+                    if not img_bytes:
+                        continue
+                    images_out.append({
+                        "page": page_num,
+                        "name": name,
+                        "ext": img_ext,
+                        "data_base64": base64.b64encode(img_bytes).decode("utf-8")
+                    })
+        return jsonify({"images": images_out})
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
