@@ -2,11 +2,12 @@ from flask import Flask, request, jsonify
 import os
 import time
 import base64
+import re
 import pdfplumber
 
 try:
     from pdfplumber.utils import extract_image
-except ImportError:  # pdfplumber < 0.11 fallback
+except ImportError:
     from pdfminer.pdftypes import resolve1
     from pdfminer.psparser import PSLiteral, PSKeyword
 
@@ -26,54 +27,32 @@ except ImportError:  # pdfplumber < 0.11 fallback
             return [_literal_name(f) for f in filters]
         return [_literal_name(filters)]
 
-    @app.route("/extract-images", methods=["POST"])
-def extract_images():
-    if request.headers.get("x-api-key") != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
+    def extract_image(obj):
+        stream = obj.get("stream")
+        if stream is None:
+            return {"image": None, "ext": None}
+        stream = resolve1(stream)
+        data = stream.get_data()
+        filters = _stream_filters(stream)
+        ext = "bin"
+        for flt in filters:
+            if flt == "DCTDecode":
+                ext = "jpg"
+                break
+            if flt == "JPXDecode":
+                ext = "jp2"
+                break
+            if flt in ("CCITTFaxDecode", "CCFDecode"):
+                ext = "tiff"
+                break
+            if flt in ("FlateDecode", "LZWDecode"):
+                ext = "png"
+                break
+        return {"image": data, "ext": ext}
 
-    pdf_file = request.files.get("file")
-    if not pdf_file:
-        return jsonify({"error": "No file provided"}), 400
-
-    try:
-        images_out = []
-        with pdfplumber.open(pdf_file) as pdf:
-            seen = set()
-            for page_num, page in enumerate(pdf.pages, 1):
-                page_objects = getattr(page, "objects", {})
-                if isinstance(page_objects, dict):
-                    image_objects = page_objects.get("image", {}) or {}
-                else:
-                    image_objects = {
-                        obj.get("name"): obj
-                        for obj in page_objects
-                        if isinstance(obj, dict)
-                        and obj.get("object_type") == "image"
-                        and obj.get("name")
-                    }
-
-                for img in page.images:
-                    name = img.get("name")
-                    if not name or name in seen:
-                        continue
-                    seen.add(name)
-                    obj = image_objects.get(name)
-                    if not obj:
-                        continue
-                    extracted = extract_image(obj)
-                    img_bytes = extracted.get("image")
-                    if not img_bytes:
-                        continue
-                    img_ext = extracted.get("ext") or "bin"
-                    images_out.append({
-                        "page": page_num,
-                        "name": name,
-                        "ext": img_ext,
-                        "data_base64": base64.b64encode(img_bytes).decode("utf-8")
-                    })
-        return jsonify({"images": images_out})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+app = Flask(__name__)
+API_KEY = os.environ.get("API_KEY")
+PORT = int(os.environ.get("PORT", 9546))
 
 @app.route("/", methods=["GET"])
 def root():
@@ -93,8 +72,6 @@ def extract_sitecheck_protocol():
         return jsonify({"error": "No file provided"}), 400
 
     try:
-        import re
-
         result = {
             "document_header": {},
             "site_info": {},
@@ -147,11 +124,7 @@ def extract_sitecheck_protocol():
                 if "status" not in result["site_info"]:
                     chars_df = first_page.chars
                     if chars_df is not None and len(chars_df) > 0:
-                        if hasattr(chars_df, 'to_dict'):
-                            chars = chars_df.to_dict('records')
-                        else:
-                            chars = chars_df
-
+                        chars = chars_df.to_dict('records') if hasattr(chars_df, 'to_dict') else chars_df
                         for option in status_options:
                             option_words = first_page.search(option)
                             if option_words:
@@ -235,7 +208,6 @@ def extract_sitecheck_protocol():
                                 else:
                                     status_7_pos = page.search("Status 7")
                                     status_9_pos = page.search("Status 9")
-
                                     if hasattr(page, 'rects'):
                                         for rect in page.rects:
                                             if rect.get('fill', False):
@@ -258,7 +230,13 @@ def extract_sitecheck_protocol():
                                 option_line = lines[i]
                                 if "Schlüssel" in option_line:
                                     if any(marker in option_line for marker in ["✓", "X", "■", "●"]):
-                                        value = option_line.replace("✓", "").replace("X", "").replace("■", "").replace("●", "").strip()
+                                        value = (
+                                            option_line.replace("✓", "")
+                                                       .replace("X", "")
+                                                       .replace("■", "")
+                                                       .replace("●", "")
+                                                       .strip()
+                                        )
                                         current_subsection[zas_key] = value
                                         break
 
@@ -499,7 +477,6 @@ def extract_all():
                     safe_table = [[cell or "" for cell in row] for row in table]
                     headers = safe_table[0] if safe_table else []
                     data = safe_table[1:] if len(safe_table) > 1 else []
-                    import pandas as pd
                     df = pd.DataFrame(data, columns=headers)
                     table_data = {
                         "table_number": i,
@@ -555,12 +532,21 @@ def extract_images():
         with pdfplumber.open(pdf_file) as pdf:
             seen = set()
             for page_num, page in enumerate(pdf.pages, 1):
-                image_objects = page.objects.get("image", {})
+                page_objects = getattr(page, "objects", {})
+                if isinstance(page_objects, dict):
+                    image_objects = page_objects.get("image", {}) or {}
+                else:
+                    image_objects = {
+                        obj.get("name"): obj
+                        for obj in page_objects
+                        if isinstance(obj, dict)
+                        and obj.get("object_type") == "image"
+                        and obj.get("name")
+                    }
+
                 for img in page.images:
                     name = img.get("name")
-                    if not name:
-                        continue
-                    if name in seen:
+                    if not name or name in seen:
                         continue
                     seen.add(name)
                     obj = image_objects.get(name)
@@ -568,9 +554,9 @@ def extract_images():
                         continue
                     extracted = extract_image(obj)
                     img_bytes = extracted.get("image")
-                    img_ext = extracted.get("ext") or "bin"
                     if not img_bytes:
                         continue
+                    img_ext = extracted.get("ext") or "bin"
                     images_out.append({
                         "page": page_num,
                         "name": name,
